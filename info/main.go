@@ -276,27 +276,38 @@ func grafanaInfo(log logger, domain string) {
 }
 
 func vmInfo(log logger, domain string) {
-	name, err := runCommand("kubectl", "get", "secrets", "vmuser-vm-stack-victoria-metrics-k8s-stack", "-n", "vm",
-		"-o", "jsonpath={.data.name}")
-	if err != nil {
-		log.warnf("读取 VictoriaMetrics 信息失败: %v", err)
-		return
-	}
-	password, _ := runCommand("kubectl", "get", "secrets", "vmuser-vm-stack-victoria-metrics-k8s-stack", "-n", "vm",
-		"-o", "jsonpath={.data.password}")
-	username, _ := runCommand("kubectl", "get", "secrets", "vmuser-vm-stack-victoria-metrics-k8s-stack", "-n", "vm",
-		"-o", "jsonpath={.data.username}")
+    secretName := "vmuser-vm-stack-victoria-metrics-k8s-stack"
+    ns := "vm"
 
-	name = decodeBase64(name)
-	password = decodeBase64(password)
-	username = decodeBase64(username)
+    nameB64, err := runCommand("kubectl", "get", "secrets", secretName, "-n", ns,
+        "-o", "jsonpath={.data.name}")
+    if err != nil {
+        log.warnf("读取 VictoriaMetrics secret (name) 失败: %v", err)
+        return
+    }
 
-	log.infof("Sealos Cloud victoria-metrics Version Info:")
-	log.printf("url: https://vmmmmauth.%s/vmui", domain)
-	log.printf("vmagent url visti: kubectl port-forward  svc/vmagent-vm-stack-victoria-metrics-k8s-stack -n vm --address 0.0.0.0  8429:8429")
-	log.printf("username: %s", username)
-	log.printf("password: %s", password)
-	log.printf("name: %s", name)
+    passwordB64, _ := runCommand("kubectl", "get", "secrets", secretName, "-n", ns,
+        "-o", "jsonpath={.data.password}")
+
+    usernameB64, _ := runCommand("kubectl", "get", "secrets", secretName, "-n", ns,
+        "-o", "jsonpath={.data.username}")
+
+    name := decodeBase64(nameB64)
+    username := decodeBase64(usernameB64)
+    password := decodeBase64(passwordB64)
+
+    // 如果三个值都为空，视为整体失败
+    if name == "" && username == "" && password == "" {
+        log.warnf("VictoriaMetrics 凭证为空或 secret 不存在")
+        return
+    }
+
+    log.infof("Sealos Cloud victoria-metrics Version Info:")
+    log.printf("url: https://vmmmmauth.%s/vmui", domain)
+    log.printf("url: https://vmmmmagent.%s", domain)
+    log.printf("username: %s", username)
+    log.printf("password: %s", password)
+    log.printf("name: %s", name)
 }
 
 func vlogsInfo(log logger, domain string) {
