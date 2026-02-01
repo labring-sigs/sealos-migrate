@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/modood/table"
 )
 
 const (
@@ -31,6 +33,15 @@ const (
 )
 
 type logger struct{}
+
+// ServiceInfo 服务信息表格结构
+type ServiceInfo struct {
+	Name        string
+	User        string
+	Password    string
+	Version     string
+	PublishAddr string
+}
 
 func (l logger) timestamp() string {
 	return time.Now().Format("2006-01-02 15:04:05")
@@ -100,11 +111,25 @@ func main() {
 	}
 
 	if !*onlyNsAdmin {
-		minioInfo(log, sealosCloudDomain, sealosCloudPort)
-		grafanaInfo(log, sealosCloudDomain)
-		vmInfo(log, sealosCloudDomain)
-		vlogsInfo(log, sealosCloudDomain)
-		finishInfo(log, sealosCloudDomain, sealosCloudPort, k8sVersion, sealosCloudVersion)
+		// 收集所有服务信息
+		var services []ServiceInfo
+
+		services = append(services, minioInfo(sealosCloudDomain, sealosCloudPort)...)
+		services = append(services, grafanaInfo(sealosCloudDomain)...)
+		services = append(services, vmInfo(sealosCloudDomain)...)
+		services = append(services, vlogsInfo(sealosCloudDomain)...)
+		services = append(services, hamiInfo()...) // 添加 HAMI 信息
+		services = append(services, finishInfo(sealosCloudDomain, sealosCloudPort, k8sVersion, sealosCloudVersion)...)
+
+		// 输出表格
+		if len(services) > 0 {
+			log.printf("")
+			table.Output(services)
+		} else {
+			log.warnf("未找到任何服务信息")
+		}
+
+		// 单独输出证书信息
 		tlsTips(log, sealosCloudDomain)
 	}
 
@@ -214,27 +239,43 @@ func getSealosCloudVersion() (string, error) {
 	return image[lastColon+1:], nil
 }
 
-func finishInfo(log logger, domain, port, k8sVersion, sealosCloudVersion string) {
+func finishInfo(domain, port, k8sVersion, sealosCloudVersion string) []ServiceInfo {
+	var services []ServiceInfo
+
 	adminPassword, err := runCommand("kubectl", "get", "cm", "sealos-cloud-admin", "-n", "sealos-system",
 		"-o", "jsonpath={.data.PASSWORD}")
 	if err != nil {
-		log.warnf("读取默认管理员密码失败: %v", err)
+		adminPassword = "<获取失败>"
 	}
-	log.infof("Sealos Cloud Version Info:")
-	log.printf("Kubernetes version: %s", k8sVersion)
-	log.printf("Sealos Cloud version: %s", sealosCloudVersion)
-	log.printf("Access URL: https://%s:%s", domain, port)
-	log.printf("Default admin credentials:")
-	log.printf("  Username: admin")
-	log.printf("  Password: %s", adminPassword)
+
+	// 添加主服务信息
+	services = append(services, ServiceInfo{
+		Name:        "Sealos Cloud",
+		User:        "admin",
+		Password:    adminPassword,
+		Version:     sealosCloudVersion,
+		PublishAddr: fmt.Sprintf("https://%s:%s", domain, port),
+	})
+
+	// 添加Kubernetes版本信息
+	services = append(services, ServiceInfo{
+		Name:        "Kubernetes",
+		User:        "-",
+		Password:    "-",
+		Version:     k8sVersion,
+		PublishAddr: "-",
+	})
+
+	return services
 }
 
-func minioInfo(log logger, domain, port string) {
+func minioInfo(domain, port string) []ServiceInfo {
+	var services []ServiceInfo
+
 	consoleUser, err := runCommand("kubectl", "get", "cm", "objectstorage-config", "-n", "sealos-system",
 		"-o", "jsonpath={.data.MINIO_CONSOLE_USER}")
 	if err != nil {
-		log.warnf("读取 MinIO 用户失败: %v", err)
-		return
+		return services
 	}
 	consolePassword, _ := runCommand("kubectl", "get", "cm", "objectstorage-config", "-n", "sealos-system",
 		"-o", "jsonpath={.data.MINIO_CONSOLE_PASSWORD}")
@@ -250,73 +291,115 @@ func minioInfo(log logger, domain, port string) {
 		minioPort = "80"
 	}
 
-	log.infof("Sealos Cloud MinIO Version Info:")
-	log.printf("You can access the MinIO console at: http://objectstorageconsole.%s:%s", domain, minioPort)
-	log.printf("MinIO Console Username: %s", consoleUser)
-	log.printf("MinIO Console Password: %s", consolePassword)
-	log.printf("MinIO KB Username: %s", kbUser)
-	log.printf("MinIO KB Password: %s", kbPassword)
-	log.printf("MinIO Test Username: testuser")
-	log.printf("MinIO Test Password: %s", testUserPassword)
+	minioURL := fmt.Sprintf("http://objectstorageconsole.%s:%s", domain, minioPort)
+
+	// MinIO Console
+	services = append(services, ServiceInfo{
+		Name:        "MinIO Console",
+		User:        consoleUser,
+		Password:    consolePassword,
+		Version:     "-",
+		PublishAddr: minioURL,
+	})
+
+	// MinIO KB
+	services = append(services, ServiceInfo{
+		Name:        "MinIO KB",
+		User:        kbUser,
+		Password:    kbPassword,
+		Version:     "-",
+		PublishAddr: minioURL,
+	})
+
+	// MinIO Test User
+	services = append(services, ServiceInfo{
+		Name:        "MinIO Test",
+		User:        "testuser",
+		Password:    testUserPassword,
+		Version:     "-",
+		PublishAddr: minioURL,
+	})
+
+	return services
 }
 
-func grafanaInfo(log logger, domain string) {
+func grafanaInfo(domain string) []ServiceInfo {
+	var services []ServiceInfo
+
 	adminPassword, err := runCommand("kubectl", "get", "cm", "grafana-config", "-n", "sealos-system",
 		"-o", "jsonpath={.data.GF_PASSWORD}")
 	if err != nil {
-		log.warnf("读取 Grafana 配置失败: %v", err)
-		return
+		return services
 	}
 	adminUser, _ := runCommand("kubectl", "get", "cm", "grafana-config", "-n", "sealos-system",
 		"-o", "jsonpath={.data.GF_USER}")
-	log.infof("Sealos Cloud Grafana Version Info:")
-	log.printf("url: https://gggggrafana.%s", domain)
-	log.printf("username: %s", adminUser)
-	log.printf("password: %s", adminPassword)
+
+	services = append(services, ServiceInfo{
+		Name:        "Grafana",
+		User:        adminUser,
+		Password:    adminPassword,
+		Version:     "-",
+		PublishAddr: fmt.Sprintf("https://gggggrafana.%s", domain),
+	})
+
+	return services
 }
 
-func vmInfo(log logger, domain string) {
-    secretName := "vmuser-vm-stack-victoria-metrics-k8s-stack"
-    ns := "vm"
+func vmInfo(domain string) []ServiceInfo {
+	var services []ServiceInfo
 
-    nameB64, err := runCommand("kubectl", "get", "secrets", secretName, "-n", ns,
-        "-o", "jsonpath={.data.name}")
-    if err != nil {
-        log.warnf("读取 VictoriaMetrics secret (name) 失败: %v", err)
-        return
-    }
+	secretName := "vmuser-vm-stack-victoria-metrics-k8s-stack"
+	ns := "vm"
 
-    passwordB64, _ := runCommand("kubectl", "get", "secrets", secretName, "-n", ns,
-        "-o", "jsonpath={.data.password}")
+	nameB64, err := runCommand("kubectl", "get", "secrets", secretName, "-n", ns,
+		"-o", "jsonpath={.data.name}")
+	if err != nil {
+		return services
+	}
 
-    usernameB64, _ := runCommand("kubectl", "get", "secrets", secretName, "-n", ns,
-        "-o", "jsonpath={.data.username}")
+	passwordB64, _ := runCommand("kubectl", "get", "secrets", secretName, "-n", ns,
+		"-o", "jsonpath={.data.password}")
 
-    name := decodeBase64(nameB64)
-    username := decodeBase64(usernameB64)
-    password := decodeBase64(passwordB64)
+	usernameB64, _ := runCommand("kubectl", "get", "secrets", secretName, "-n", ns,
+		"-o", "jsonpath={.data.username}")
 
-    // 如果三个值都为空，视为整体失败
-    if name == "" && username == "" && password == "" {
-        log.warnf("VictoriaMetrics 凭证为空或 secret 不存在")
-        return
-    }
+	name := decodeBase64(nameB64)
+	username := decodeBase64(usernameB64)
+	password := decodeBase64(passwordB64)
 
-    log.infof("Sealos Cloud victoria-metrics Version Info:")
-    log.printf("url: https://vmmmmauth.%s/vmui", domain)
-    log.printf("url: https://vmmmmagent.%s", domain)
-    log.printf("username: %s", username)
-    log.printf("password: %s", password)
-    log.printf("name: %s", name)
+	// 如果三个值都为空，视为整体失败
+	if name == "" && username == "" && password == "" {
+		return services
+	}
+
+	// VictoriaMetrics vmui
+	services = append(services, ServiceInfo{
+		Name:        "VictoriaMetrics VMUI",
+		User:        username,
+		Password:    password,
+		Version:     "-",
+		PublishAddr: fmt.Sprintf("https://vmmmmauth.%s/vmui", domain),
+	})
+
+	// VictoriaMetrics Agent
+	services = append(services, ServiceInfo{
+		Name:        "VictoriaMetrics Agent",
+		User:        username,
+		Password:    password,
+		Version:     "-",
+		PublishAddr: fmt.Sprintf("https://vmmmmagent.%s", domain),
+	})
+
+	return services
 }
 
-func vlogsInfo(log logger, domain string) {
-	log.infof("Sealos Cloud Vlogs Version Info:")
+func vlogsInfo(domain string) []ServiceInfo {
+	var services []ServiceInfo
+
 	sysUser, err := runCommand("kubectl", "get", "configmap", "vlogs-config", "-n", "sealos-system",
 		"-o", "jsonpath={.data.SELECT_USER}")
 	if err != nil {
-		log.warnf("读取 Vlogs 配置失败: %v", err)
-		return
+		return services
 	}
 	sysPassword, _ := runCommand("kubectl", "get", "configmap", "vlogs-config", "-n", "sealos-system",
 		"-o", "jsonpath={.data.SELECT_PASSWORD}")
@@ -326,8 +409,53 @@ func vlogsInfo(log logger, domain string) {
 	userPassword, _ := runCommand("kubectl", "get", "configmap", "vlogs-config-user", "-n", "sealos-system",
 		"-o", "jsonpath={.data.SELECT_PASSWORD}")
 
-	log.infof("System logs address: https://vvvvvvlogs.%s , user: %s , password: %s ", domain, sysUser, sysPassword)
-	log.infof("User logs address: https://vvvvvvuserlogs.%s , user: %s , password: %s ", domain, userUser, userPassword)
+	// System Logs
+	services = append(services, ServiceInfo{
+		Name:        "System Logs",
+		User:        sysUser,
+		Password:    sysPassword,
+		Version:     "-",
+		PublishAddr: fmt.Sprintf("https://vvvvvvlogs.%s", domain),
+	})
+
+	// User Logs
+	services = append(services, ServiceInfo{
+		Name:        "User Logs",
+		User:        userUser,
+		Password:    userPassword,
+		Version:     "-",
+		PublishAddr: fmt.Sprintf("https://vvvvvvuserlogs.%s", domain),
+	})
+
+	return services
+}
+
+func hamiInfo() []ServiceInfo {
+	var services []ServiceInfo
+
+	// 读取 HAMI webui 配置
+	webuiAddress, err := runCommand("kubectl", "get", "cm", "hami-webui-config", "-n", "sealos-system",
+		"-o", "jsonpath={.data.HAMI_WEBUI_ADDRESS}")
+	if err != nil {
+		// HAMI 配置不存在，直接返回空数组
+		return services
+	}
+
+	webuiUser, _ := runCommand("kubectl", "get", "cm", "hami-webui-config", "-n", "sealos-system",
+		"-o", "jsonpath={.data.HAMI_WEBUI_USER}")
+	webuiPassword, _ := runCommand("kubectl", "get", "cm", "hami-webui-config", "-n", "sealos-system",
+		"-o", "jsonpath={.data.HAMI_WEBUI_PASSWORD}")
+
+	// 添加 HAMI WebUI 信息到表格
+	services = append(services, ServiceInfo{
+		Name:        "HAMI WebUI",
+		User:        webuiUser,
+		Password:    webuiPassword,
+		Version:     "-",
+		PublishAddr: webuiAddress,
+	})
+
+	return services
 }
 
 func tlsTips(log logger, domain string) {
@@ -339,6 +467,8 @@ func tlsTips(log logger, domain string) {
 	}
 	certMode, _ := runCommand("kubectl", "get", "configmap", "cert-config", "-n", "sealos-system",
 		"-o", "jsonpath={.data.CERT_MODE}")
+	dnsmasqEnabled, _ := runCommand("kubectl", "get", "configmap", "cert-config", "-n", "sealos-system",
+		"-o", "jsonpath={.data.DNSMASQ_ENABLED}")
 
 	log.printf("TLS certificate information (important - please review):")
 	switch certMode {
@@ -353,9 +483,53 @@ func tlsTips(log logger, domain string) {
 		log.printf("A custom TLS certificate and private key were provided.")
 		log.printf("Ensure the DNS name %s resolves to this server's IP so the certificate is valid.", domain)
 		log.printf("If you encounter certificate errors in clients, verify the certificate chain and that the hostname matches.")
+	case "offline":
+		log.printf("Offline mode selected — TLS certificates are not managed by Sealos Cloud.")
+		log.printf("Ensure that the existing certificates on the cluster are valid and trusted by clients.")
+
+		// 检查 DNSMasq 是否启用(不区分大小写)
+		if strings.ToLower(strings.TrimSpace(dnsmasqEnabled)) != "true" {
+			manualDomain := domain
+			log.printf("DNSMasq is disabled. Please configure DNS records for %s, *.%s, and update.code.visualstudio.com.", manualDomain, manualDomain)
+		}
+
+		log.printf("All offline files have been copied to the NGINX location.")
+
+		// 获取本地IP
+		localIP, err := getLocalIP()
+		if err != nil {
+			log.warnf("获取本地IP失败: %v", err)
+			localIP = "<your-server-ip>"
+		}
+		log.printf("Please visit: http://%s:32000 to verify offline resources are accessible.", localIP)
 	default:
 		log.errorf("Unknown CERT_MODE: %s", certMode)
 	}
+}
+
+// getLocalIP 获取本机IP地址
+func getLocalIP() (string, error) {
+	// 尝试使用 hostname -I 命令获取IP
+	output, err := runCommand("hostname", "-I")
+	if err != nil {
+		// 如果 hostname -I 失败，尝试使用 ip route get 1
+		output, err = runShell("ip route get 1 | awk '{print $7}' | head -1")
+		if err != nil {
+			// 如果都失败，尝试使用 ifconfig
+			output, err = runShell("ifconfig | grep 'inet ' | grep -v 127.0.0.1 | awk '{print $2}' | head -1")
+			if err != nil {
+				return "", fmt.Errorf("无法获取本地IP地址")
+			}
+		}
+	}
+
+	// hostname -I 可能返回多个IP，取第一个
+	parts := strings.Fields(output)
+	if len(parts) == 0 {
+		return "", fmt.Errorf("未找到有效的IP地址")
+	}
+
+	return parts[0], nil
 }
 
 func decodeBase64(value string) string {
