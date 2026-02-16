@@ -32,6 +32,10 @@ write_md5() {
 run_optimize() {
   local file="$1"
   local optimize_cmd="$2"
+  local skip_optimize="${SKIP_OPTIMIZE:-}"
+  if [[ "$skip_optimize" == "1" || "$skip_optimize" == "true" ]]; then
+    return
+  fi
   if [[ -z "$optimize_cmd" ]]; then
     return
   fi
