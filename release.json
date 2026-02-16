@@ -1,0 +1,13 @@
+{
+  "optimize_cmd": "upx --best {bin}",
+  "targets": [
+    {
+      "dir": "fix-kb-logs",
+      "binary": "fix-kb-logs"
+    },
+    {
+      "dir": "info",
+      "binary": "gen-info"
+    }
+  ]
+}
