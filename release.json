@@ -7,7 +7,7 @@
     },
     {
       "dir": "info",
-      "binary": "info"
+      "binary": "gen-info"
     }
   ]
 }
