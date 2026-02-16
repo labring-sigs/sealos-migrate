@@ -243,9 +243,16 @@ func finishInfo(domain, port, k8sVersion, sealosCloudVersion string) []ServiceIn
 	var services []ServiceInfo
 
 	adminPassword, err := runCommand("kubectl", "get", "cm", "sealos-cloud-admin", "-n", "sealos-system",
-		"-o", "jsonpath={.data.PASSWORD}")
+		"-o", "jsonpath={.data.PASSWORD}", "--ignore-not-found")
 	if err != nil {
-		adminPassword = "<获取失败>"
+		adminPassword = ""
+	}
+	if strings.TrimSpace(adminPassword) == "" {
+		adminPassword, err = runCommand("kubectl", "get", "job", "init-job", "-n", "account-system",
+			"-o", "jsonpath={.spec.template.spec.containers[0].env[?(@.name==\"ADMIN_PASSWORD\")].value}")
+		if err != nil {
+			adminPassword = "<获取失败>"
+		}
 	}
 
 	// 添加主服务信息
