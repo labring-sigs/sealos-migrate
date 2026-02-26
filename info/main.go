@@ -224,19 +224,21 @@ func getKubernetesVersion() (string, error) {
 }
 
 func getSealosCloudVersion() (string, error) {
-	image, err := runCommand("kubectl", "get", "deployment", "desktop-frontend", "-n", "sealos",
-		"-o", "jsonpath={.spec.template.spec.containers[0].image}")
-	if err != nil {
-		return "", err
+	deploys := []string{
+		"desktop-frontend",
+		"sealos-desktop",
 	}
-	if image == "" {
-		return "", fmt.Errorf("deployment image 为空")
+	for _, deploy := range deploys {
+		image, err := runCommand("kubectl", "get", "deployment", deploy, "-n", "sealos",
+			"-o", "jsonpath={.spec.template.spec.containers[0].image}")
+		if err == nil && image != "" {
+			lastColon := strings.LastIndex(image, ":")
+			if lastColon != -1 && lastColon != len(image)-1 {
+				return image[lastColon+1:], nil
+			}
+		}
 	}
-	lastColon := strings.LastIndex(image, ":")
-	if lastColon == -1 || lastColon == len(image)-1 {
-		return "", fmt.Errorf("无法解析镜像版本: %s", image)
-	}
-	return image[lastColon+1:], nil
+	return "", fmt.Errorf("未找到 Sealos Cloud 版本信息")
 }
 
 func finishInfo(domain, port, k8sVersion, sealosCloudVersion string) []ServiceInfo {
@@ -558,18 +560,27 @@ func generateNsAdminLink(namespace, configMap, userID, userUID string) (string, 
 	secret := envMap["GENERATE_TOKEN"]
 	globalDBURI := firstNonEmpty(envMap["GLOBAL_COCKROACHDB_URI"], envMap["globalCockroachdbURI"])
 	if tokenPrefix == "" || secret == "" {
-		configContent, cfgErr := runCommand("kubectl", "get", "cm", "desktop-frontend-config", "-n", "sealos",
-			"-o", "jsonpath={.data.config\\.yaml}")
-		if cfgErr == nil && configContent != "" {
-			domain, jwtGlobal, dbURI := parseDesktopFrontendConfig(configContent)
-			if tokenPrefix == "" && domain != "" {
-				tokenPrefix = fmt.Sprintf("https://%s/switchRegion?token=", domain)
-			}
-			if secret == "" && jwtGlobal != "" {
-				secret = jwtGlobal
-			}
-			if globalDBURI == "" && dbURI != "" {
-				globalDBURI = dbURI
+		confignames := []string{
+			"desktop-frontend-config",
+			"sealos-desktop-config",
+		}
+		for _, cfgName := range confignames {
+			cfgContent, cfgErr := runCommand("kubectl", "get", "cm", cfgName, "-n", "sealos",
+				"-o", "jsonpath={.data.config\\.yaml}", "--ignore-not-found")
+			if cfgErr == nil && cfgContent != "" {
+				domain, jwtGlobal, dbURI := parseDesktopFrontendConfig(cfgContent)
+				if tokenPrefix == "" && domain != "" {
+					tokenPrefix = fmt.Sprintf("https://%s/switchRegion?token=", domain)
+				}
+				if secret == "" && jwtGlobal != "" {
+					secret = jwtGlobal
+				}
+				if globalDBURI == "" && dbURI != "" {
+					globalDBURI = dbURI
+				}
+				if tokenPrefix != "" && secret != "" {
+					break
+				}
 			}
 		}
 	}
