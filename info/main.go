@@ -120,6 +120,8 @@ func main() {
 		services = append(services, vlogsInfo(sealosCloudDomain)...)
 		services = append(services, hamiInfo()...) // 添加 HAMI 信息
 		services = append(services, finishInfo(sealosCloudDomain, sealosCloudPort, k8sVersion, sealosCloudVersion)...)
+		services = append(services, aiproxyInfo()...)                  // 添加 AIProxy 信息
+		services = append(services, cockroachInfo(sealosCloudDomain)...) // 添加 CockroachDB 信息
 
 		// 输出表格
 		if len(services) > 0 {
@@ -462,6 +464,73 @@ func hamiInfo() []ServiceInfo {
 		Password:    webuiPassword,
 		Version:     "-",
 		PublishAddr: webuiAddress,
+	})
+
+	return services
+}
+
+func aiproxyInfo() []ServiceInfo {
+	var services []ServiceInfo
+
+	// 读取 AIProxy 配置
+	adminKey, err := runCommand("kubectl", "get", "configmap", "aiproxy-env", "-n", "aiproxy-system",
+		"-o", "jsonpath={.data.ADMIN_KEY}")
+	if err != nil {
+		// AIProxy 配置不存在，直接返回空数组
+		return services
+	}
+
+	// 添加 AIProxy 信息到表格
+	services = append(services, ServiceInfo{
+		Name:        "AIProxy",
+		User:        "admin",
+		Password:    adminKey,
+		Version:     "-",
+		PublishAddr: "-",
+	})
+
+	return services
+}
+
+func cockroachInfo(domain string) []ServiceInfo {
+	var services []ServiceInfo
+
+	// 读取 CockroachDB URI
+	uri, err := runCommand("kubectl", "get", "configmap", "sealos-config", "-n", "sealos-system",
+		"-o", "jsonpath={.data.databaseGlobalCockroachdbURI}")
+	if err != nil {
+		// CockroachDB 配置不存在，直接返回空数组
+		return services
+	}
+
+	// 解析 URI: postgresql://username:password@host:port/database
+	// 示例: postgresql://root:password@cockroachdb.sealos.svc:26257/defaultdb
+	parsedURI := uri
+	if strings.HasPrefix(parsedURI, "postgresql://") {
+		parsedURI = strings.TrimPrefix(parsedURI, "postgresql://")
+	}
+
+	// 提取用户名和密码
+	// 格式: username:password@host:port/database
+	var username, password string
+	atIndex := strings.Index(parsedURI, "@")
+	if atIndex != -1 {
+		// 获取 @ 之前的部分（username:password）
+		userPassPart := parsedURI[:atIndex]
+		colonIndex := strings.Index(userPassPart, ":")
+		if colonIndex != -1 {
+			username = userPassPart[:colonIndex]
+			password = userPassPart[colonIndex+1:]
+		}
+	}
+
+	// 添加 CockroachDB 信息到表格
+	services = append(services, ServiceInfo{
+		Name:        "CockroachDB",
+		User:        username,
+		Password:    password,
+		Version:     "-",
+		PublishAddr: fmt.Sprintf("https://cockroachdb.%s", domain),
 	})
 
 	return services
