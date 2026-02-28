@@ -114,13 +114,13 @@ func main() {
 		// 收集所有服务信息
 		var services []ServiceInfo
 
-		services = append(services, minioInfo(sealosCloudDomain, sealosCloudPort)...)
+		services = append(services, minioInfo(sealosCloudDomain)...)
 		services = append(services, grafanaInfo(sealosCloudDomain)...)
 		services = append(services, vmInfo(sealosCloudDomain)...)
 		services = append(services, vlogsInfo(sealosCloudDomain)...)
 		services = append(services, hamiInfo()...) // 添加 HAMI 信息
 		services = append(services, finishInfo(sealosCloudDomain, sealosCloudPort, k8sVersion, sealosCloudVersion)...)
-		services = append(services, aiproxyInfo()...)                  // 添加 AIProxy 信息
+		services = append(services, aiproxyInfo(sealosCloudDomain)...)   // 添加 AIProxy 信息
 		services = append(services, cockroachInfo(sealosCloudDomain)...) // 添加 CockroachDB 信息
 
 		// 输出表格
@@ -280,7 +280,7 @@ func finishInfo(domain, port, k8sVersion, sealosCloudVersion string) []ServiceIn
 	return services
 }
 
-func minioInfo(domain, port string) []ServiceInfo {
+func minioInfo(domain string) []ServiceInfo {
 	var services []ServiceInfo
 
 	consoleUser, err := runCommand("kubectl", "get", "cm", "objectstorage-config", "-n", "sealos-system",
@@ -297,12 +297,7 @@ func minioInfo(domain, port string) []ServiceInfo {
 	testUserPassword, _ := runCommand("kubectl", "get", "cm", "objectstorage-config", "-n", "sealos-system",
 		"-o", "jsonpath={.data.MINIO_TESTUSER_PASSWORD}")
 
-	minioPort := port
-	if minioPort == "" {
-		minioPort = "80"
-	}
-
-	minioURL := fmt.Sprintf("http://objectstorageconsole.%s:%s", domain, minioPort)
+	minioURL := fmt.Sprintf("https://osconsole.%s", domain)
 
 	// MinIO Console
 	services = append(services, ServiceInfo{
@@ -469,7 +464,7 @@ func hamiInfo() []ServiceInfo {
 	return services
 }
 
-func aiproxyInfo() []ServiceInfo {
+func aiproxyInfo(domain string) []ServiceInfo {
 	var services []ServiceInfo
 
 	// 读取 AIProxy 配置
@@ -479,14 +474,14 @@ func aiproxyInfo() []ServiceInfo {
 		// AIProxy 配置不存在，直接返回空数组
 		return services
 	}
-
+	aiproxyURL := fmt.Sprintf("https://aiproxy.%s", domain)
 	// 添加 AIProxy 信息到表格
 	services = append(services, ServiceInfo{
 		Name:        "AIProxy",
 		User:        "admin",
 		Password:    adminKey,
 		Version:     "-",
-		PublishAddr: "-",
+		PublishAddr: aiproxyURL,
 	})
 
 	return services
