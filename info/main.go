@@ -763,20 +763,6 @@ func buildPath(stack []yamlKey, leaf string) string {
 
 func lookupUserUID(dbURI, userID string) (string, error) {
 	query := fmt.Sprintf("SELECT id, uid FROM \"User\" WHERE id='%s' LIMIT 1;", escapeSQLLiteral(userID))
-	if _, err := exec.LookPath("psql"); err == nil {
-		output, err := runCommand("psql", dbURI, "-t", "-A", "-F", ",", "-c", query)
-		if err != nil {
-			return "", fmt.Errorf("psql 查询失败: %v", err)
-		}
-		return parseUserUIDLine(output, userID)
-	}
-	if _, err := exec.LookPath("cockroach"); err == nil {
-		output, err := runCommand("cockroach", "sql", "--url", dbURI, "--format=csv", "-e", query)
-		if err != nil {
-			return "", fmt.Errorf("cockroach 查询失败: %v", err)
-		}
-		return parseUserUIDCSV(output, userID)
-	}
 	podName, err := findCockroachPod()
 	if err != nil {
 		return "", err
