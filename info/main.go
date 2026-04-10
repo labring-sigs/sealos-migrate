@@ -76,6 +76,24 @@ func (l logger) printf(format string, args ...any) {
 func main() {
 	log := logger{}
 
+	flag.Usage = func() {
+		out := flag.CommandLine.Output()
+		fmt.Fprintf(out, "用法:\n")
+		fmt.Fprintf(out, "  %s [参数]\n\n", filepath.Base(os.Args[0]))
+		fmt.Fprintf(out, "说明:\n")
+		fmt.Fprintf(out, "  默认输出 Sealos Cloud 相关服务信息，并可生成 ns-admin 登录链接。\n")
+		fmt.Fprintf(out, "  也支持通过单独参数仅输出某个配置值。\n\n")
+		fmt.Fprintf(out, "参数:\n")
+		flag.PrintDefaults()
+		fmt.Fprintf(out, "\n示例:\n")
+		fmt.Fprintf(out, "  %s -cloud-domain\n", filepath.Base(os.Args[0]))
+		fmt.Fprintf(out, "  %s -global-db-internal\n", filepath.Base(os.Args[0]))
+		fmt.Fprintf(out, "  %s -global-db-external\n", filepath.Base(os.Args[0]))
+		fmt.Fprintf(out, "  %s -region-id\n", filepath.Base(os.Args[0]))
+		fmt.Fprintf(out, "  %s -cluster-id\n", filepath.Base(os.Args[0]))
+		fmt.Fprintf(out, "  %s -only-ns-admin -ns-admin-user-id admin\n", filepath.Base(os.Args[0]))
+	}
+
 	sealosEnvPath := flag.String("sealos-env", defaultSealosEnvPath, "sealos.env 文件路径")
 	onlyNsAdmin := flag.Bool("only-ns-admin", false, "仅生成 ns-admin 登录链接")
 	skipNsAdmin := flag.Bool("skip-ns-admin", false, "跳过 ns-admin 登录链接生成")
@@ -83,10 +101,62 @@ func main() {
 	nsAdminUserUID := flag.String("ns-admin-user-uid", "", "ns-admin 登录用户 UID（可为空自动查）")
 	nsAdminNamespace := flag.String("ns-admin-namespace", "admin-system", "ns-admin configmap 所在命名空间")
 	nsAdminConfigMap := flag.String("ns-admin-configmap", "admin-sealos-admin", "ns-admin configmap 名称")
+	printCloudDomain := flag.Bool("cloud-domain", false, "仅输出 sealos-config 中的 cloudDomain")
+	printGlobalDBInternal := flag.Bool("global-db-internal", false, "仅输出内网全局数据库地址")
+	printGlobalDBExternal := flag.Bool("global-db-external", false, "仅输出外网全局数据库地址")
+	printRegionID := flag.Bool("region-id", false, "仅输出区域 ID")
+	printClusterID := flag.Bool("cluster-id", false, "仅输出集群 ID（kube-system namespace UID 前八位）")
 	flag.Parse()
 
 	if _, err := exec.LookPath("kubectl"); err != nil {
 		log.errorf("kubectl 未安装或不在 PATH 中")
+	}
+
+	if *printCloudDomain || *printGlobalDBInternal || *printGlobalDBExternal || *printRegionID || *printClusterID {
+		if *printCloudDomain {
+			value, err := getSealosConfigValue("cloudDomain")
+			if err != nil {
+				log.errorf("获取 cloudDomain 失败: %v", err)
+			}
+			fmt.Println(value)
+		}
+		if *printGlobalDBInternal {
+			value, err := getSealosConfigValue("databaseGlobalCockroachdbURI")
+			if err != nil {
+				log.errorf("获取内网全局数据库地址失败: %v", err)
+			}
+			fmt.Println(value)
+		}
+		if *printGlobalDBExternal {
+			internalURI, err := getSealosConfigValue("databaseGlobalCockroachdbURI")
+			if err != nil {
+				log.errorf("获取内网全局数据库地址失败: %v", err)
+			}
+			cloudDomain, err := getSealosConfigValue("cloudDomain")
+			if err != nil {
+				log.errorf("获取 cloudDomain 失败: %v", err)
+			}
+			value, err := buildExternalDatabaseURI(internalURI, cloudDomain)
+			if err != nil {
+				log.errorf("生成外网全局数据库地址失败: %v", err)
+			}
+			fmt.Println(value)
+		}
+		if *printRegionID {
+			value, err := getSealosConfigValue("regionUID")
+			if err != nil {
+				log.errorf("获取区域 ID 失败: %v", err)
+			}
+			fmt.Println(value)
+		}
+		if *printClusterID {
+			value, err := getClusterID()
+			if err != nil {
+				log.errorf("获取集群 ID 失败: %v", err)
+			}
+			fmt.Println(value)
+		}
+		return
 	}
 
 	log.infof("Sealos Cloud")
@@ -188,6 +258,43 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func getSealosConfigValue(key string) (string, error) {
+	value, err := runCommand("kubectl", "get", "configmap", "sealos-config", "-n", "sealos-system",
+		"-o", fmt.Sprintf("jsonpath={.data.%s}", key))
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(value) == "" {
+		return "", fmt.Errorf("sealos-config 中的 %s 为空", key)
+	}
+	return value, nil
+}
+
+func buildExternalDatabaseURI(internalURI, cloudDomain string) (string, error) {
+	parsed, err := url.Parse(internalURI)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(cloudDomain) == "" {
+		return "", fmt.Errorf("cloudDomain 为空")
+	}
+
+	parsed.Host = fmt.Sprintf("%s:%d", cloudDomain, 36257)
+	return parsed.String(), nil
+}
+
+func getClusterID() (string, error) {
+	uid, err := runCommand("kubectl", "get", "ns", "kube-system", "-o", "jsonpath={.metadata.uid}")
+	if err != nil {
+		return "", err
+	}
+	uid = strings.TrimSpace(uid)
+	if len(uid) < 8 {
+		return "", fmt.Errorf("kube-system namespace UID 长度不足: %q", uid)
+	}
+	return uid[:8], nil
 }
 
 func runCommand(name string, args ...string) (string, error) {
