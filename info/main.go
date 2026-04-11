@@ -43,6 +43,12 @@ type ServiceInfo struct {
 	PublishAddr string
 }
 
+// RegionInfo 区域信息表格结构
+type RegionInfo struct {
+	Key   string
+	Value string
+}
+
 func (l logger) timestamp() string {
 	return time.Now().Format("2006-01-02 15:04:05")
 }
@@ -91,6 +97,10 @@ func main() {
 		fmt.Fprintf(out, "  %s -global-db-external\n", filepath.Base(os.Args[0]))
 		fmt.Fprintf(out, "  %s -region-id\n", filepath.Base(os.Args[0]))
 		fmt.Fprintf(out, "  %s -cluster-id\n", filepath.Base(os.Args[0]))
+		fmt.Fprintf(out, "  %s -jwt-global\n", filepath.Base(os.Args[0]))
+		fmt.Fprintf(out, "  %s -password-salt\n", filepath.Base(os.Args[0]))
+		fmt.Fprintf(out, "  %s -regin-info\n", filepath.Base(os.Args[0]))
+		fmt.Fprintf(out, "  %s -region-info\n", filepath.Base(os.Args[0]))
 		fmt.Fprintf(out, "  %s -only-ns-admin -ns-admin-user-id admin\n", filepath.Base(os.Args[0]))
 	}
 
@@ -106,13 +116,47 @@ func main() {
 	printGlobalDBExternal := flag.Bool("global-db-external", false, "仅输出外网全局数据库地址")
 	printRegionID := flag.Bool("region-id", false, "仅输出区域 ID")
 	printClusterID := flag.Bool("cluster-id", false, "仅输出集群 ID（kube-system namespace UID 前八位）")
+	printJWTGlobal := flag.Bool("jwt-global", false, "仅输出 desktop auth jwt.global")
+	printPasswordSalt := flag.Bool("password-salt", false, "仅输出 desktop auth passwordSalt")
+	printReginInfo := flag.Bool("regin-info", false, "以表格输出 jwt-global、password-salt、global-db-external")
+	printRegionInfo := flag.Bool("region-info", false, "以表格输出 jwt-global、password-salt、global-db-external（regin-info 别名）")
 	flag.Parse()
 
 	if _, err := exec.LookPath("kubectl"); err != nil {
 		log.errorf("kubectl 未安装或不在 PATH 中")
 	}
 
-	if *printCloudDomain || *printGlobalDBInternal || *printGlobalDBExternal || *printRegionID || *printClusterID {
+	if *printJWTGlobal && *printPasswordSalt {
+		log.errorf("参数冲突: -jwt-global 和 -password-salt 仅支持单个参数输出，请分别执行")
+	}
+
+	if *printCloudDomain || *printGlobalDBInternal || *printGlobalDBExternal || *printRegionID || *printClusterID || *printJWTGlobal || *printPasswordSalt || *printReginInfo || *printRegionInfo {
+		if *printReginInfo || *printRegionInfo {
+			jwtGlobal, passwordSalt, err := getDesktopAuthSecrets()
+			if err != nil {
+				log.errorf("获取 desktop auth 配置失败: %v", err)
+			}
+			internalURI, err := getSealosConfigValue("databaseGlobalCockroachdbURI")
+			if err != nil {
+				log.errorf("获取内网全局数据库地址失败: %v", err)
+			}
+			cloudDomain, err := getSealosConfigValue("cloudDomain")
+			if err != nil {
+				log.errorf("获取 cloudDomain 失败: %v", err)
+			}
+			globalDBExternal, err := buildExternalDatabaseURI(internalURI, cloudDomain)
+			if err != nil {
+				log.errorf("生成外网全局数据库地址失败: %v", err)
+			}
+
+			infos := []RegionInfo{
+				{Key: "jwt-global", Value: jwtGlobal},
+				{Key: "password-salt", Value: passwordSalt},
+				{Key: "global-db-external", Value: globalDBExternal},
+			}
+			table.Output(infos)
+			return
+		}
 		if *printCloudDomain {
 			value, err := getSealosConfigValue("cloudDomain")
 			if err != nil {
@@ -155,6 +199,18 @@ func main() {
 				log.errorf("获取集群 ID 失败: %v", err)
 			}
 			fmt.Println(value)
+		}
+		if *printJWTGlobal || *printPasswordSalt {
+			jwtGlobal, passwordSalt, err := getDesktopAuthSecrets()
+			if err != nil {
+				log.errorf("获取 desktop auth 配置失败: %v", err)
+			}
+			if *printJWTGlobal {
+				fmt.Println(jwtGlobal)
+			}
+			if *printPasswordSalt {
+				fmt.Println(passwordSalt)
+			}
 		}
 		return
 	}
@@ -739,7 +795,7 @@ func generateNsAdminLink(namespace, configMap, userID, userUID string) (string, 
 			cfgContent, cfgErr := runCommand("kubectl", "get", "cm", cfgName, "-n", "sealos",
 				"-o", "jsonpath={.data.config\\.yaml}", "--ignore-not-found")
 			if cfgErr == nil && cfgContent != "" {
-				domain, jwtGlobal, dbURI := parseDesktopFrontendConfig(cfgContent)
+				domain, jwtGlobal, _, dbURI := parseDesktopFrontendConfig(cfgContent)
 				if tokenPrefix == "" && domain != "" {
 					tokenPrefix = fmt.Sprintf("https://%s/switchRegion?token=", domain)
 				}
@@ -801,9 +857,10 @@ type yamlKey struct {
 	key    string
 }
 
-func parseDesktopFrontendConfig(content string) (string, string, string) {
+func parseDesktopFrontendConfig(content string) (string, string, string, string) {
 	var domain string
 	var jwtGlobal string
+	var passwordSalt string
 	var dbURI string
 	lines := strings.Split(content, "\n")
 	stack := make([]yamlKey, 0, 8)
@@ -838,11 +895,33 @@ func parseDesktopFrontendConfig(content string) (string, string, string) {
 		if path == "desktop.auth.jwt.global" && jwtGlobal == "" {
 			jwtGlobal = value
 		}
+		if (path == "desktop.auth.idp.password.salt") && passwordSalt == "" {
+			passwordSalt = value
+		}
 		if path == "database.globalCockroachdbURI" && dbURI == "" {
 			dbURI = value
 		}
 	}
-	return domain, jwtGlobal, dbURI
+	return domain, jwtGlobal, passwordSalt, dbURI
+}
+
+func getDesktopAuthSecrets() (string, string, error) {
+	confignames := []string{
+		"desktop-frontend-config",
+		"sealos-desktop-config",
+	}
+	for _, cfgName := range confignames {
+		cfgContent, cfgErr := runCommand("kubectl", "get", "cm", cfgName, "-n", "sealos",
+			"-o", "jsonpath={.data.config\\.yaml}", "--ignore-not-found")
+		if cfgErr != nil || cfgContent == "" {
+			continue
+		}
+		_, jwtGlobal, passwordSalt, _ := parseDesktopFrontendConfig(cfgContent)
+		if jwtGlobal != "" || passwordSalt != "" {
+			return jwtGlobal, passwordSalt, nil
+		}
+	}
+	return "", "", fmt.Errorf("未找到 desktop auth jwt.global 或 passwordSalt")
 }
 
 func leadingSpaces(line string) int {
