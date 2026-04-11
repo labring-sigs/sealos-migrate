@@ -118,8 +118,8 @@ func main() {
 	printClusterID := flag.Bool("cluster-id", false, "仅输出集群 ID（kube-system namespace UID 前八位）")
 	printJWTGlobal := flag.Bool("jwt-global", false, "仅输出 desktop auth jwt.global")
 	printPasswordSalt := flag.Bool("password-salt", false, "仅输出 desktop auth passwordSalt")
-	printReginInfo := flag.Bool("regin-info", false, "以表格输出 jwt-global、password-salt、global-db-external")
-	printRegionInfo := flag.Bool("region-info", false, "以表格输出 jwt-global、password-salt、global-db-external（regin-info 别名）")
+	printReginInfo := flag.Bool("regin-info", false, "以表格输出 cluster-id、region-id、cloud-domain、jwt-global、password-salt、global-db-external")
+	printRegionInfo := flag.Bool("region-info", false, "以表格输出 cluster-id、region-id、cloud-domain、jwt-global、password-salt、global-db-external（regin-info 别名）")
 	flag.Parse()
 
 	if _, err := exec.LookPath("kubectl"); err != nil {
@@ -136,6 +136,14 @@ func main() {
 			if err != nil {
 				log.errorf("获取 desktop auth 配置失败: %v", err)
 			}
+			clusterID, err := getClusterID()
+			if err != nil {
+				log.errorf("获取集群 ID 失败: %v", err)
+			}
+			regionID, err := getSealosConfigValue("regionUID")
+			if err != nil {
+				log.errorf("获取区域 ID 失败: %v", err)
+			}
 			internalURI, err := getSealosConfigValue("databaseGlobalCockroachdbURI")
 			if err != nil {
 				log.errorf("获取内网全局数据库地址失败: %v", err)
@@ -150,6 +158,9 @@ func main() {
 			}
 
 			infos := []RegionInfo{
+				{Key: "cloud-domain", Value: cloudDomain},
+				{Key: "cluster-id", Value: clusterID},
+				{Key: "region-id", Value: regionID},
 				{Key: "jwt-global", Value: jwtGlobal},
 				{Key: "password-salt", Value: passwordSalt},
 				{Key: "global-db-external", Value: globalDBExternal},
