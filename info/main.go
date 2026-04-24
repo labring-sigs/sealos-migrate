@@ -26,7 +26,7 @@ import (
 
 const (
 	defaultSealosEnvPath = "/root/.sealos/cloud/sealos.env"
-	defaultGlobalsPath   = "/root/.sealos/cloud/values/globals.yaml"
+	defaultGlobalsPath   = "/root/.sealos/cloud/values/global.yaml"
 )
 
 const (
