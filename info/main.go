@@ -12,7 +12,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net"
 	"net/url"
 	"os"
 	"os/exec"
@@ -26,7 +25,6 @@ import (
 
 const (
 	defaultSealosCloudPort = "443"
-	defaultGlobalsPath     = "/root/.sealos/cloud/values/global.yaml"
 )
 
 const (
@@ -784,7 +782,6 @@ func generateNsAdminLink(namespace, configMap, userID, userUID string) (string, 
 	}
 	tokenPrefix := envMap["TOKEN_URL_PREFIX"]
 	secret := envMap["GENERATE_TOKEN"]
-	globalDBURI := firstNonEmpty(envMap["GLOBAL_COCKROACHDB_URI"], envMap["globalCockroachdbURI"])
 	if tokenPrefix == "" || secret == "" {
 		confignames := []string{
 			"desktop-frontend-config",
@@ -794,15 +791,12 @@ func generateNsAdminLink(namespace, configMap, userID, userUID string) (string, 
 			cfgContent, cfgErr := runCommand("kubectl", "get", "cm", cfgName, "-n", "sealos",
 				"-o", "jsonpath={.data.config\\.yaml}", "--ignore-not-found")
 			if cfgErr == nil && cfgContent != "" {
-				domain, jwtGlobal, _, dbURI := parseDesktopFrontendConfig(cfgContent)
+				domain, jwtGlobal, _ := parseDesktopFrontendConfig(cfgContent)
 				if tokenPrefix == "" && domain != "" {
 					tokenPrefix = fmt.Sprintf("https://%s/switchRegion?token=", domain)
 				}
 				if secret == "" && jwtGlobal != "" {
 					secret = jwtGlobal
-				}
-				if globalDBURI == "" && dbURI != "" {
-					globalDBURI = dbURI
 				}
 				if tokenPrefix != "" && secret != "" {
 					break
@@ -815,10 +809,10 @@ func generateNsAdminLink(namespace, configMap, userID, userUID string) (string, 
 	}
 	resolvedUID := strings.TrimSpace(userUID)
 	if resolvedUID == "" {
-		if globalDBURI == "" {
-			return "", fmt.Errorf("未提供用户 UID，且无法获取 GLOBAL_COCKROACHDB_URI")
+		globalDBURI, err := getSealosConfigValue("databaseGlobalCockroachdbURI")
+		if err != nil {
+			return "", fmt.Errorf("未提供用户 UID，且无法获取 databaseGlobalCockroachdbURI: %v", err)
 		}
-		var err error
 		resolvedUID, err = lookupUserUID(globalDBURI, userID)
 		if err != nil {
 			return "", err
@@ -856,11 +850,10 @@ type yamlKey struct {
 	key    string
 }
 
-func parseDesktopFrontendConfig(content string) (string, string, string, string) {
+func parseDesktopFrontendConfig(content string) (string, string, string) {
 	var domain string
 	var jwtGlobal string
 	var passwordSalt string
-	var dbURI string
 	lines := strings.Split(content, "\n")
 	stack := make([]yamlKey, 0, 8)
 	for _, rawLine := range lines {
@@ -897,11 +890,8 @@ func parseDesktopFrontendConfig(content string) (string, string, string, string)
 		if (path == "desktop.auth.idp.password.salt") && passwordSalt == "" {
 			passwordSalt = value
 		}
-		if path == "database.globalCockroachdbURI" && dbURI == "" {
-			dbURI = value
-		}
 	}
-	return domain, jwtGlobal, passwordSalt, dbURI
+	return domain, jwtGlobal, passwordSalt
 }
 
 func getDesktopAuthSecrets() (string, string, error) {
@@ -915,7 +905,7 @@ func getDesktopAuthSecrets() (string, string, error) {
 		if cfgErr != nil || cfgContent == "" {
 			continue
 		}
-		_, jwtGlobal, passwordSalt, _ := parseDesktopFrontendConfig(cfgContent)
+		_, jwtGlobal, passwordSalt := parseDesktopFrontendConfig(cfgContent)
 		if jwtGlobal != "" || passwordSalt != "" {
 			return jwtGlobal, passwordSalt, nil
 		}
@@ -1090,80 +1080,18 @@ func shouldRetryDirectQueryWithoutSSL(err error, dbURI string) bool {
 }
 
 func resolveLookupUserDBURI(defaultURI string) (string, bool, error) {
-	return resolveLookupUserDBURIWithGlobalsPath(defaultURI, defaultGlobalsPath, resolveServiceClusterAddress)
-}
-
-func resolveLookupUserDBURIWithGlobalsPath(defaultURI, globalsPath string, resolver func(serviceName, namespace, port string) (string, error)) (string, bool, error) {
-	overrideURI, err := getGlobalDatabaseURIOverride(globalsPath)
-	if err != nil {
-		return "", false, fmt.Errorf("读取 globals.yaml 失败: %v", err)
+	defaultURI = strings.TrimSpace(defaultURI)
+	if defaultURI == "" {
+		return "", false, fmt.Errorf("databaseGlobalCockroachdbURI 为空")
 	}
-	if strings.TrimSpace(overrideURI) == "" {
+	if isKubernetesServiceURI(defaultURI) {
 		return defaultURI, false, nil
 	}
-	if !isKubernetesServiceURI(overrideURI) {
-		normalizedURI, err := ensureDirectDatabaseQueryURI(overrideURI)
-		if err != nil {
-			return "", false, err
-		}
-		return normalizedURI, true, nil
-	}
-
-	resolvedURI, err := rewriteCockroachURLForClusterServiceWithResolver(overrideURI, resolver)
-	if err != nil {
-		return "", false, err
-	}
-	normalizedURI, err := ensureDirectDatabaseQueryURI(resolvedURI)
+	normalizedURI, err := ensureDirectDatabaseQueryURI(defaultURI)
 	if err != nil {
 		return "", false, err
 	}
 	return normalizedURI, true, nil
-}
-
-func getGlobalDatabaseURIOverride(globalsPath string) (string, error) {
-	content, err := os.ReadFile(globalsPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
-		return "", err
-	}
-	return parseGlobalDatabaseURIFromGlobals(string(content)), nil
-}
-
-func parseGlobalDatabaseURIFromGlobals(content string) string {
-	lines := strings.Split(content, "\n")
-	stack := make([]yamlKey, 0, 8)
-	for _, rawLine := range lines {
-		line := strings.TrimRight(rawLine, " \t\r")
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-
-		indent := leadingSpaces(rawLine)
-		parts := strings.SplitN(trimmed, ":", 2)
-		key := strings.TrimSpace(parts[0])
-		value := ""
-		if len(parts) > 1 {
-			value = strings.TrimSpace(parts[1])
-		}
-
-		for len(stack) > 0 && indent <= stack[len(stack)-1].indent {
-			stack = stack[:len(stack)-1]
-		}
-
-		if value == "" {
-			stack = append(stack, yamlKey{indent: indent, key: key})
-			continue
-		}
-
-		value = strings.Trim(value, `"'`)
-		if buildPath(stack, key) == "global.featureConfigs.globalDatabase.uri" {
-			return value
-		}
-	}
-	return ""
 }
 
 func isKubernetesServiceURI(dbURI string) bool {
@@ -1177,24 +1105,6 @@ func isKubernetesServiceURI(dbURI string) bool {
 func isKubernetesServiceHost(host string) bool {
 	parts := strings.Split(strings.TrimSuffix(strings.TrimSpace(host), "."), ".")
 	return len(parts) >= 3 && parts[2] == "svc"
-}
-
-func rewriteCockroachURLForClusterServiceWithResolver(dbURI string, resolver func(serviceName, namespace, port string) (string, error)) (string, error) {
-	parsed, err := url.Parse(dbURI)
-	if err != nil {
-		return "", fmt.Errorf("解析数据库地址失败: %v", err)
-	}
-	serviceName, namespace, err := splitKubernetesServiceHost(parsed.Hostname())
-	if err != nil {
-		return "", err
-	}
-
-	address, err := resolver(serviceName, namespace, parsed.Port())
-	if err != nil {
-		return "", err
-	}
-	parsed.Host = address
-	return parsed.String(), nil
 }
 
 func ensureDirectDatabaseQueryURI(dbURI string) (string, error) {
@@ -1227,39 +1137,6 @@ func forceDisableDirectDatabaseQuerySSL(dbURI string) (string, error) {
 	query.Set("sslmode", "disable")
 	parsed.RawQuery = query.Encode()
 	return parsed.String(), nil
-}
-
-func splitKubernetesServiceHost(host string) (string, string, error) {
-	parts := strings.Split(strings.TrimSuffix(strings.TrimSpace(host), "."), ".")
-	if len(parts) < 3 || parts[2] != "svc" {
-		return "", "", fmt.Errorf("数据库地址不是 k8s.svc Service 地址: %s", host)
-	}
-	return parts[0], parts[1], nil
-}
-
-func resolveServiceClusterAddress(serviceName, namespace, port string) (string, error) {
-	clusterIP, err := runCommand("kubectl", "get", "svc", serviceName, "-n", namespace, "-o", "jsonpath={.spec.clusterIP}")
-	if err != nil {
-		return "", fmt.Errorf("获取 Service %s/%s ClusterIP 失败: %v", namespace, serviceName, err)
-	}
-	clusterIP = strings.TrimSpace(clusterIP)
-	if clusterIP == "" || strings.EqualFold(clusterIP, "None") {
-		return "", fmt.Errorf("Service %s/%s 没有可用的 ClusterIP", namespace, serviceName)
-	}
-
-	resolvedPort := strings.TrimSpace(port)
-	if resolvedPort == "" {
-		resolvedPort, err = runCommand("kubectl", "get", "svc", serviceName, "-n", namespace, "-o", "jsonpath={.spec.ports[0].port}")
-		if err != nil {
-			return "", fmt.Errorf("获取 Service %s/%s 端口失败: %v", namespace, serviceName, err)
-		}
-		resolvedPort = strings.TrimSpace(resolvedPort)
-		if resolvedPort == "" {
-			return "", fmt.Errorf("Service %s/%s 没有可用的端口", namespace, serviceName)
-		}
-	}
-
-	return net.JoinHostPort(clusterIP, resolvedPort), nil
 }
 
 func findCockroachPod() (string, error) {
