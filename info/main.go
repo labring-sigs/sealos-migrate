@@ -25,8 +25,8 @@ import (
 )
 
 const (
-	defaultSealosEnvPath = "/root/.sealos/cloud/sealos.env"
-	defaultGlobalsPath   = "/root/.sealos/cloud/values/global.yaml"
+	defaultSealosCloudPort = "443"
+	defaultGlobalsPath     = "/root/.sealos/cloud/values/global.yaml"
 )
 
 const (
@@ -110,7 +110,6 @@ func main() {
 		fmt.Fprintf(out, "  %s -only-ns-admin -ns-admin-user-id admin\n", filepath.Base(os.Args[0]))
 	}
 
-	sealosEnvPath := flag.String("sealos-env", defaultSealosEnvPath, "sealos.env 文件路径")
 	onlyNsAdmin := flag.Bool("only-ns-admin", false, "仅生成 ns-admin 登录链接")
 	skipNsAdmin := flag.Bool("skip-ns-admin", false, "跳过 ns-admin 登录链接生成")
 	nsAdminUserID := flag.String("ns-admin-user-id", "admin", "ns-admin 登录用户 ID")
@@ -234,14 +233,16 @@ func main() {
 
 	log.infof("Sealos Cloud")
 
-	sealosEnv, err := loadEnvFile(*sealosEnvPath)
+	sealosCloudDomain, err := getSealosConfigValue("cloudDomain")
 	if err != nil {
-		log.errorf("Sealos cloud not found %s. Please install sealos cloud first.", *sealosEnvPath)
+		log.errorf("获取 cloudDomain 失败: %v", err)
 	}
-	log.infof("Loading configuration from %s", *sealosEnvPath)
-
-	sealosCloudDomain := firstNonEmpty(sealosEnv["SEALOS_V2_CLOUD_DOMAIN"], sealosEnv["SEALOS_CLOUD_DOMAIN"])
-	sealosCloudPort := firstNonEmpty(sealosEnv["SEALOS_V2_CLOUD_PORT"], sealosEnv["SEALOS_CLOUD_PORT"])
+	sealosCloudPort, err := getOptionalSealosConfigValue("cloudPort")
+	if err != nil {
+		log.errorf("获取 cloudPort 失败: %v", err)
+	}
+	sealosCloudPort = firstNonEmpty(sealosCloudPort, defaultSealosCloudPort)
+	log.infof("Loading configuration from sealos-config")
 
 	k8sVersion, err := getKubernetesVersion()
 	if err != nil {
@@ -297,33 +298,6 @@ func main() {
 	}
 }
 
-func loadEnvFile(path string) (map[string]string, error) {
-	data, err := os.ReadFile(filepath.Clean(path))
-	if err != nil {
-		return nil, err
-	}
-	envs := map[string]string{}
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if strings.HasPrefix(line, "export ") {
-			line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
-		}
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := strings.TrimSpace(parts[0])
-		val := strings.TrimSpace(parts[1])
-		val = strings.Trim(val, `"'`)
-		envs[key] = val
-	}
-	return envs, nil
-}
-
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if value != "" {
@@ -334,8 +308,7 @@ func firstNonEmpty(values ...string) string {
 }
 
 func getSealosConfigValue(key string) (string, error) {
-	value, err := runCommand("kubectl", "get", "configmap", "sealos-config", "-n", "sealos-system",
-		"-o", fmt.Sprintf("jsonpath={.data.%s}", key))
+	value, err := getOptionalSealosConfigValue(key)
 	if err != nil {
 		return "", err
 	}
@@ -343,6 +316,15 @@ func getSealosConfigValue(key string) (string, error) {
 		return "", fmt.Errorf("sealos-config 中的 %s 为空", key)
 	}
 	return value, nil
+}
+
+func getOptionalSealosConfigValue(key string) (string, error) {
+	value, err := runCommand("kubectl", "get", "configmap", "sealos-config", "-n", "sealos-system",
+		"-o", fmt.Sprintf("jsonpath={.data.%s}", key))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(value), nil
 }
 
 func buildExternalDatabaseURI(internalURI, cloudDomain string) (string, error) {
