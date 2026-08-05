@@ -5,6 +5,15 @@ import (
 	"testing"
 )
 
+func TestOfflineCenterURL(t *testing.T) {
+	const domain = "cloud.example.com"
+	const want = "https://offline.cloud.example.com"
+
+	if got := offlineCenterURL(domain); got != want {
+		t.Fatalf("offlineCenterURL(%q) = %q, want %q", domain, got, want)
+	}
+}
+
 func TestResolveLookupUserDBURIUsesPodQueryForKubernetesService(t *testing.T) {
 	dbURI := "postgresql://sealos:password@sealos-cockroachdb-public.sealos.svc:26257/global"
 

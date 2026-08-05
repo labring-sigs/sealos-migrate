@@ -726,43 +726,15 @@ func tlsTips(log logger, domain string) {
 			log.printf("DNSMasq is disabled. Please configure DNS records for %s, *.%s, and update.code.visualstudio.com.", manualDomain, manualDomain)
 		}
 
-		log.printf("All offline files have been copied to the NGINX location.")
-
-		// 获取本地IP
-		localIP, err := getLocalIP()
-		if err != nil {
-			log.warnf("获取本地IP失败: %v", err)
-			localIP = "<your-server-ip>"
-		}
-		log.printf("Please visit: http://%s:32000 to verify offline resources are accessible.", localIP)
+		log.printf("Download and install Offline Center from %s.", offlineCenterURL(domain))
+		log.printf("Use Offline Center to trust certificates and configure IDE offline resources.")
 	default:
 		log.errorf("Unknown CERT_MODE: %s", certMode)
 	}
 }
 
-// getLocalIP 获取本机IP地址
-func getLocalIP() (string, error) {
-	// 尝试使用 hostname -I 命令获取IP
-	output, err := runCommand("hostname", "-I")
-	if err != nil {
-		// 如果 hostname -I 失败，尝试使用 ip route get 1
-		output, err = runShell("ip route get 1 | awk '{print $7}' | head -1")
-		if err != nil {
-			// 如果都失败，尝试使用 ifconfig
-			output, err = runShell("ifconfig | grep 'inet ' | grep -v 127.0.0.1 | awk '{print $2}' | head -1")
-			if err != nil {
-				return "", fmt.Errorf("无法获取本地IP地址")
-			}
-		}
-	}
-
-	// hostname -I 可能返回多个IP，取第一个
-	parts := strings.Fields(output)
-	if len(parts) == 0 {
-		return "", fmt.Errorf("未找到有效的IP地址")
-	}
-
-	return parts[0], nil
+func offlineCenterURL(domain string) string {
+	return fmt.Sprintf("https://offline.%s", domain)
 }
 
 func decodeBase64(value string) string {
