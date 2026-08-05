@@ -734,7 +734,7 @@ func tlsTips(log logger, domain string) {
 }
 
 func offlineCenterURL(domain string) string {
-	return fmt.Sprintf("https://offline.%s", domain)
+	return fmt.Sprintf("http://offline.%s", domain)
 }
 
 func decodeBase64(value string) string {

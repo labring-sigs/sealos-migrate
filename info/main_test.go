@@ -7,7 +7,7 @@ import (
 
 func TestOfflineCenterURL(t *testing.T) {
 	const domain = "cloud.example.com"
-	const want = "https://offline.cloud.example.com"
+	const want = "http://offline.cloud.example.com"
 
 	if got := offlineCenterURL(domain); got != want {
 		t.Fatalf("offlineCenterURL(%q) = %q, want %q", domain, got, want)
