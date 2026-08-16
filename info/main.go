@@ -1087,9 +1087,16 @@ func ensureDirectDatabaseQueryURI(dbURI string) (string, error) {
 	if parsed.Scheme == "" || parsed.Host == "" {
 		return "", fmt.Errorf("数据库地址格式不正确")
 	}
-
+	log := logger{}
+	value, err := getOptionalSealosConfigValue("databaseType")
+	if err != nil {
+		log.warnf("获取databaseType参数失败: %v", err)
+	}
 	query := parsed.Query()
-	if query.Get("sslmode") == "" {
+	if query.Get("sslmode") == "" && value == "cockroachdb" {
+		query.Set("sslmode", "require")
+	}
+	if query.Get("sslmode") == "" && value != "cockroachdb" {
 		query.Set("sslmode", "disable")
 	}
 	parsed.RawQuery = query.Encode()
