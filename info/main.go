@@ -12,7 +12,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net"
 	"net/url"
 	"os"
 	"os/exec"
@@ -25,8 +24,7 @@ import (
 )
 
 const (
-	defaultSealosEnvPath = "/root/.sealos/cloud/sealos.env"
-	defaultGlobalsPath   = "/root/.sealos/cloud/values/global.yaml"
+	defaultSealosCloudPort = "443"
 )
 
 const (
@@ -110,7 +108,6 @@ func main() {
 		fmt.Fprintf(out, "  %s -only-ns-admin -ns-admin-user-id admin\n", filepath.Base(os.Args[0]))
 	}
 
-	sealosEnvPath := flag.String("sealos-env", defaultSealosEnvPath, "sealos.env 文件路径")
 	onlyNsAdmin := flag.Bool("only-ns-admin", false, "仅生成 ns-admin 登录链接")
 	skipNsAdmin := flag.Bool("skip-ns-admin", false, "跳过 ns-admin 登录链接生成")
 	nsAdminUserID := flag.String("ns-admin-user-id", "admin", "ns-admin 登录用户 ID")
@@ -234,14 +231,16 @@ func main() {
 
 	log.infof("Sealos Cloud")
 
-	sealosEnv, err := loadEnvFile(*sealosEnvPath)
+	sealosCloudDomain, err := getSealosConfigValue("cloudDomain")
 	if err != nil {
-		log.errorf("Sealos cloud not found %s. Please install sealos cloud first.", *sealosEnvPath)
+		log.errorf("获取 cloudDomain 失败: %v", err)
 	}
-	log.infof("Loading configuration from %s", *sealosEnvPath)
-
-	sealosCloudDomain := firstNonEmpty(sealosEnv["SEALOS_V2_CLOUD_DOMAIN"], sealosEnv["SEALOS_CLOUD_DOMAIN"])
-	sealosCloudPort := firstNonEmpty(sealosEnv["SEALOS_V2_CLOUD_PORT"], sealosEnv["SEALOS_CLOUD_PORT"])
+	sealosCloudPort, err := getOptionalSealosConfigValue("cloudPort")
+	if err != nil {
+		log.errorf("获取 cloudPort 失败: %v", err)
+	}
+	sealosCloudPort = firstNonEmpty(sealosCloudPort, defaultSealosCloudPort)
+	log.infof("Loading configuration from sealos-config")
 
 	k8sVersion, err := getKubernetesVersion()
 	if err != nil {
@@ -297,33 +296,6 @@ func main() {
 	}
 }
 
-func loadEnvFile(path string) (map[string]string, error) {
-	data, err := os.ReadFile(filepath.Clean(path))
-	if err != nil {
-		return nil, err
-	}
-	envs := map[string]string{}
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if strings.HasPrefix(line, "export ") {
-			line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
-		}
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := strings.TrimSpace(parts[0])
-		val := strings.TrimSpace(parts[1])
-		val = strings.Trim(val, `"'`)
-		envs[key] = val
-	}
-	return envs, nil
-}
-
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if value != "" {
@@ -334,8 +306,7 @@ func firstNonEmpty(values ...string) string {
 }
 
 func getSealosConfigValue(key string) (string, error) {
-	value, err := runCommand("kubectl", "get", "configmap", "sealos-config", "-n", "sealos-system",
-		"-o", fmt.Sprintf("jsonpath={.data.%s}", key))
+	value, err := getOptionalSealosConfigValue(key)
 	if err != nil {
 		return "", err
 	}
@@ -343,6 +314,15 @@ func getSealosConfigValue(key string) (string, error) {
 		return "", fmt.Errorf("sealos-config 中的 %s 为空", key)
 	}
 	return value, nil
+}
+
+func getOptionalSealosConfigValue(key string) (string, error) {
+	value, err := runCommand("kubectl", "get", "configmap", "sealos-config", "-n", "sealos-system",
+		"-o", fmt.Sprintf("jsonpath={.data.%s}", key))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(value), nil
 }
 
 func buildExternalDatabaseURI(internalURI, cloudDomain string) (string, error) {
@@ -746,43 +726,15 @@ func tlsTips(log logger, domain string) {
 			log.printf("DNSMasq is disabled. Please configure DNS records for %s, *.%s, and update.code.visualstudio.com.", manualDomain, manualDomain)
 		}
 
-		log.printf("All offline files have been copied to the NGINX location.")
-
-		// 获取本地IP
-		localIP, err := getLocalIP()
-		if err != nil {
-			log.warnf("获取本地IP失败: %v", err)
-			localIP = "<your-server-ip>"
-		}
-		log.printf("Please visit: http://%s:32000 to verify offline resources are accessible.", localIP)
+		log.printf("Download and install Offline Center from %s.", offlineCenterURL(domain))
+		log.printf("Use Offline Center to trust certificates and configure IDE offline resources.")
 	default:
 		log.errorf("Unknown CERT_MODE: %s", certMode)
 	}
 }
 
-// getLocalIP 获取本机IP地址
-func getLocalIP() (string, error) {
-	// 尝试使用 hostname -I 命令获取IP
-	output, err := runCommand("hostname", "-I")
-	if err != nil {
-		// 如果 hostname -I 失败，尝试使用 ip route get 1
-		output, err = runShell("ip route get 1 | awk '{print $7}' | head -1")
-		if err != nil {
-			// 如果都失败，尝试使用 ifconfig
-			output, err = runShell("ifconfig | grep 'inet ' | grep -v 127.0.0.1 | awk '{print $2}' | head -1")
-			if err != nil {
-				return "", fmt.Errorf("无法获取本地IP地址")
-			}
-		}
-	}
-
-	// hostname -I 可能返回多个IP，取第一个
-	parts := strings.Fields(output)
-	if len(parts) == 0 {
-		return "", fmt.Errorf("未找到有效的IP地址")
-	}
-
-	return parts[0], nil
+func offlineCenterURL(domain string) string {
+	return fmt.Sprintf("http://offline.%s", domain)
 }
 
 func decodeBase64(value string) string {
@@ -802,7 +754,6 @@ func generateNsAdminLink(namespace, configMap, userID, userUID string) (string, 
 	}
 	tokenPrefix := envMap["TOKEN_URL_PREFIX"]
 	secret := envMap["GENERATE_TOKEN"]
-	globalDBURI := firstNonEmpty(envMap["GLOBAL_COCKROACHDB_URI"], envMap["globalCockroachdbURI"])
 	if tokenPrefix == "" || secret == "" {
 		confignames := []string{
 			"desktop-frontend-config",
@@ -812,15 +763,12 @@ func generateNsAdminLink(namespace, configMap, userID, userUID string) (string, 
 			cfgContent, cfgErr := runCommand("kubectl", "get", "cm", cfgName, "-n", "sealos",
 				"-o", "jsonpath={.data.config\\.yaml}", "--ignore-not-found")
 			if cfgErr == nil && cfgContent != "" {
-				domain, jwtGlobal, _, dbURI := parseDesktopFrontendConfig(cfgContent)
+				domain, jwtGlobal, _ := parseDesktopFrontendConfig(cfgContent)
 				if tokenPrefix == "" && domain != "" {
 					tokenPrefix = fmt.Sprintf("https://%s/switchRegion?token=", domain)
 				}
 				if secret == "" && jwtGlobal != "" {
 					secret = jwtGlobal
-				}
-				if globalDBURI == "" && dbURI != "" {
-					globalDBURI = dbURI
 				}
 				if tokenPrefix != "" && secret != "" {
 					break
@@ -833,10 +781,10 @@ func generateNsAdminLink(namespace, configMap, userID, userUID string) (string, 
 	}
 	resolvedUID := strings.TrimSpace(userUID)
 	if resolvedUID == "" {
-		if globalDBURI == "" {
-			return "", fmt.Errorf("未提供用户 UID，且无法获取 GLOBAL_COCKROACHDB_URI")
+		globalDBURI, err := getSealosConfigValue("databaseGlobalCockroachdbURI")
+		if err != nil {
+			return "", fmt.Errorf("未提供用户 UID，且无法获取 databaseGlobalCockroachdbURI: %v", err)
 		}
-		var err error
 		resolvedUID, err = lookupUserUID(globalDBURI, userID)
 		if err != nil {
 			return "", err
@@ -874,11 +822,10 @@ type yamlKey struct {
 	key    string
 }
 
-func parseDesktopFrontendConfig(content string) (string, string, string, string) {
+func parseDesktopFrontendConfig(content string) (string, string, string) {
 	var domain string
 	var jwtGlobal string
 	var passwordSalt string
-	var dbURI string
 	lines := strings.Split(content, "\n")
 	stack := make([]yamlKey, 0, 8)
 	for _, rawLine := range lines {
@@ -915,11 +862,8 @@ func parseDesktopFrontendConfig(content string) (string, string, string, string)
 		if (path == "desktop.auth.idp.password.salt") && passwordSalt == "" {
 			passwordSalt = value
 		}
-		if path == "database.globalCockroachdbURI" && dbURI == "" {
-			dbURI = value
-		}
 	}
-	return domain, jwtGlobal, passwordSalt, dbURI
+	return domain, jwtGlobal, passwordSalt
 }
 
 func getDesktopAuthSecrets() (string, string, error) {
@@ -933,7 +877,7 @@ func getDesktopAuthSecrets() (string, string, error) {
 		if cfgErr != nil || cfgContent == "" {
 			continue
 		}
-		_, jwtGlobal, passwordSalt, _ := parseDesktopFrontendConfig(cfgContent)
+		_, jwtGlobal, passwordSalt := parseDesktopFrontendConfig(cfgContent)
 		if jwtGlobal != "" || passwordSalt != "" {
 			return jwtGlobal, passwordSalt, nil
 		}
@@ -1108,80 +1052,18 @@ func shouldRetryDirectQueryWithoutSSL(err error, dbURI string) bool {
 }
 
 func resolveLookupUserDBURI(defaultURI string) (string, bool, error) {
-	return resolveLookupUserDBURIWithGlobalsPath(defaultURI, defaultGlobalsPath, resolveServiceClusterAddress)
-}
-
-func resolveLookupUserDBURIWithGlobalsPath(defaultURI, globalsPath string, resolver func(serviceName, namespace, port string) (string, error)) (string, bool, error) {
-	overrideURI, err := getGlobalDatabaseURIOverride(globalsPath)
-	if err != nil {
-		return "", false, fmt.Errorf("读取 globals.yaml 失败: %v", err)
+	defaultURI = strings.TrimSpace(defaultURI)
+	if defaultURI == "" {
+		return "", false, fmt.Errorf("databaseGlobalCockroachdbURI 为空")
 	}
-	if strings.TrimSpace(overrideURI) == "" {
+	if isKubernetesServiceURI(defaultURI) {
 		return defaultURI, false, nil
 	}
-	if !isKubernetesServiceURI(overrideURI) {
-		normalizedURI, err := ensureDirectDatabaseQueryURI(overrideURI)
-		if err != nil {
-			return "", false, err
-		}
-		return normalizedURI, true, nil
-	}
-
-	resolvedURI, err := rewriteCockroachURLForClusterServiceWithResolver(overrideURI, resolver)
-	if err != nil {
-		return "", false, err
-	}
-	normalizedURI, err := ensureDirectDatabaseQueryURI(resolvedURI)
+	normalizedURI, err := ensureDirectDatabaseQueryURI(defaultURI)
 	if err != nil {
 		return "", false, err
 	}
 	return normalizedURI, true, nil
-}
-
-func getGlobalDatabaseURIOverride(globalsPath string) (string, error) {
-	content, err := os.ReadFile(globalsPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
-		return "", err
-	}
-	return parseGlobalDatabaseURIFromGlobals(string(content)), nil
-}
-
-func parseGlobalDatabaseURIFromGlobals(content string) string {
-	lines := strings.Split(content, "\n")
-	stack := make([]yamlKey, 0, 8)
-	for _, rawLine := range lines {
-		line := strings.TrimRight(rawLine, " \t\r")
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-
-		indent := leadingSpaces(rawLine)
-		parts := strings.SplitN(trimmed, ":", 2)
-		key := strings.TrimSpace(parts[0])
-		value := ""
-		if len(parts) > 1 {
-			value = strings.TrimSpace(parts[1])
-		}
-
-		for len(stack) > 0 && indent <= stack[len(stack)-1].indent {
-			stack = stack[:len(stack)-1]
-		}
-
-		if value == "" {
-			stack = append(stack, yamlKey{indent: indent, key: key})
-			continue
-		}
-
-		value = strings.Trim(value, `"'`)
-		if buildPath(stack, key) == "global.featureConfigs.globalDatabase.uri" {
-			return value
-		}
-	}
-	return ""
 }
 
 func isKubernetesServiceURI(dbURI string) bool {
@@ -1197,24 +1079,6 @@ func isKubernetesServiceHost(host string) bool {
 	return len(parts) >= 3 && parts[2] == "svc"
 }
 
-func rewriteCockroachURLForClusterServiceWithResolver(dbURI string, resolver func(serviceName, namespace, port string) (string, error)) (string, error) {
-	parsed, err := url.Parse(dbURI)
-	if err != nil {
-		return "", fmt.Errorf("解析数据库地址失败: %v", err)
-	}
-	serviceName, namespace, err := splitKubernetesServiceHost(parsed.Hostname())
-	if err != nil {
-		return "", err
-	}
-
-	address, err := resolver(serviceName, namespace, parsed.Port())
-	if err != nil {
-		return "", err
-	}
-	parsed.Host = address
-	return parsed.String(), nil
-}
-
 func ensureDirectDatabaseQueryURI(dbURI string) (string, error) {
 	parsed, err := url.Parse(dbURI)
 	if err != nil {
@@ -1223,9 +1087,16 @@ func ensureDirectDatabaseQueryURI(dbURI string) (string, error) {
 	if parsed.Scheme == "" || parsed.Host == "" {
 		return "", fmt.Errorf("数据库地址格式不正确")
 	}
-
+	log := logger{}
+	value, err := getOptionalSealosConfigValue("databaseType")
+	if err != nil {
+		log.warnf("获取databaseType参数失败: %v", err)
+	}
 	query := parsed.Query()
-	if query.Get("sslmode") == "" {
+	if query.Get("sslmode") == "" && value == "cockroachdb" {
+		query.Set("sslmode", "require")
+	}
+	if query.Get("sslmode") == "" && value != "cockroachdb" {
 		query.Set("sslmode", "disable")
 	}
 	parsed.RawQuery = query.Encode()
@@ -1245,39 +1116,6 @@ func forceDisableDirectDatabaseQuerySSL(dbURI string) (string, error) {
 	query.Set("sslmode", "disable")
 	parsed.RawQuery = query.Encode()
 	return parsed.String(), nil
-}
-
-func splitKubernetesServiceHost(host string) (string, string, error) {
-	parts := strings.Split(strings.TrimSuffix(strings.TrimSpace(host), "."), ".")
-	if len(parts) < 3 || parts[2] != "svc" {
-		return "", "", fmt.Errorf("数据库地址不是 k8s.svc Service 地址: %s", host)
-	}
-	return parts[0], parts[1], nil
-}
-
-func resolveServiceClusterAddress(serviceName, namespace, port string) (string, error) {
-	clusterIP, err := runCommand("kubectl", "get", "svc", serviceName, "-n", namespace, "-o", "jsonpath={.spec.clusterIP}")
-	if err != nil {
-		return "", fmt.Errorf("获取 Service %s/%s ClusterIP 失败: %v", namespace, serviceName, err)
-	}
-	clusterIP = strings.TrimSpace(clusterIP)
-	if clusterIP == "" || strings.EqualFold(clusterIP, "None") {
-		return "", fmt.Errorf("Service %s/%s 没有可用的 ClusterIP", namespace, serviceName)
-	}
-
-	resolvedPort := strings.TrimSpace(port)
-	if resolvedPort == "" {
-		resolvedPort, err = runCommand("kubectl", "get", "svc", serviceName, "-n", namespace, "-o", "jsonpath={.spec.ports[0].port}")
-		if err != nil {
-			return "", fmt.Errorf("获取 Service %s/%s 端口失败: %v", namespace, serviceName, err)
-		}
-		resolvedPort = strings.TrimSpace(resolvedPort)
-		if resolvedPort == "" {
-			return "", fmt.Errorf("Service %s/%s 没有可用的端口", namespace, serviceName)
-		}
-	}
-
-	return net.JoinHostPort(clusterIP, resolvedPort), nil
 }
 
 func findCockroachPod() (string, error) {
