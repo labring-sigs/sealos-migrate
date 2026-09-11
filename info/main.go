@@ -1,3 +1,4 @@
+// gen-info 汇总 Sealos Cloud 运维信息并生成管理员登录链接。
 package main
 
 import (
@@ -25,6 +26,9 @@ import (
 
 const (
 	defaultSealosCloudPort = "443"
+	defaultGlobalValuesRel = ".sealos/cloud/values/global.yaml"
+	databaseTypeCockroach  = "cockroachdb"
+	databaseTypePostgreSQL = "postgresql"
 )
 
 const (
@@ -916,6 +920,9 @@ func lookupUserUID(dbURI, userID string) (string, error) {
 	if useDirectQuery {
 		return lookupUserUIDDirect(resolvedURI, userID)
 	}
+	if selectPodDatabaseType(getConfiguredDatabaseType()) == databaseTypePostgreSQL {
+		return lookupUserUIDFromPostgreSQLPod(resolvedURI, userID)
+	}
 
 	query := fmt.Sprintf("SELECT id, uid FROM \"User\" WHERE id='%s' LIMIT 1;", escapeSQLLiteral(userID))
 	podName, err := findCockroachPod()
@@ -948,6 +955,38 @@ func lookupUserUID(dbURI, userID string) (string, error) {
 		return "", fmt.Errorf("cockroach pod 查询失败: %v", err)
 	}
 	return parseUserUIDCSV(output, userID)
+}
+
+func lookupUserUIDFromPostgreSQLPod(dbURI, userID string) (string, error) {
+	podName, namespace, err := findPostgreSQLPod(dbURI)
+	if err != nil {
+		return "", err
+	}
+	localURI, err := rewritePostgreSQLURLForLocalhost(dbURI)
+	if err != nil {
+		return "", err
+	}
+	query := fmt.Sprintf("SELECT id, uid FROM \"User\" WHERE id='%s' LIMIT 1;", escapeSQLLiteral(userID))
+	output, err := runCommand(
+		"kubectl",
+		"exec",
+		"-n",
+		namespace,
+		podName,
+		"-c",
+		"postgresql",
+		"--",
+		"psql",
+		localURI,
+		"-At",
+		"-F,",
+		"-c",
+		query,
+	)
+	if err != nil {
+		return "", fmt.Errorf("PostgreSQL Pod 查询失败: %v", err)
+	}
+	return parseUserUIDLine(output, userID)
 }
 
 func parseUserUIDLine(output, userID string) (string, error) {
@@ -1079,6 +1118,70 @@ func isKubernetesServiceHost(host string) bool {
 	return len(parts) >= 3 && parts[2] == "svc"
 }
 
+func getConfiguredDatabaseType() string {
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		globalValuesPath := filepath.Join(homeDir, defaultGlobalValuesRel)
+		if content, readErr := os.ReadFile(globalValuesPath); readErr == nil {
+			if databaseType := parseGlobalDatabaseType(string(content)); databaseType != "" {
+				return databaseType
+			}
+		}
+	}
+
+	if value, err := getOptionalSealosConfigValue("databaseType"); err == nil {
+		return normalizeDatabaseType(value)
+	}
+	return ""
+}
+
+func parseGlobalDatabaseType(content string) string {
+	stack := make([]yamlKey, 0, 4)
+	for _, rawLine := range strings.Split(content, "\n") {
+		line := strings.TrimRight(rawLine, " \t\r")
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		parts := strings.SplitN(trimmed, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		indent := leadingSpaces(rawLine)
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		for len(stack) > 0 && indent <= stack[len(stack)-1].indent {
+			stack = stack[:len(stack)-1]
+		}
+		if value == "" {
+			stack = append(stack, yamlKey{indent: indent, key: key})
+			continue
+		}
+		path := buildPath(stack, key)
+		if path == "database.type" || path == "global.database.type" {
+			return normalizeDatabaseType(strings.Trim(value, `"'`))
+		}
+	}
+	return ""
+}
+
+func normalizeDatabaseType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "postgres", "postgresql", "polardb-pg":
+		return databaseTypePostgreSQL
+	case "cockroach", "cockroachdb":
+		return databaseTypeCockroach
+	default:
+		return ""
+	}
+}
+
+func selectPodDatabaseType(configuredType string) string {
+	if normalizeDatabaseType(configuredType) == databaseTypePostgreSQL {
+		return databaseTypePostgreSQL
+	}
+	return databaseTypeCockroach
+}
+
 func ensureDirectDatabaseQueryURI(dbURI string) (string, error) {
 	parsed, err := url.Parse(dbURI)
 	if err != nil {
@@ -1087,16 +1190,12 @@ func ensureDirectDatabaseQueryURI(dbURI string) (string, error) {
 	if parsed.Scheme == "" || parsed.Host == "" {
 		return "", fmt.Errorf("数据库地址格式不正确")
 	}
-	log := logger{}
-	value, err := getOptionalSealosConfigValue("databaseType")
-	if err != nil {
-		log.warnf("获取databaseType参数失败: %v", err)
-	}
+	databaseType := getConfiguredDatabaseType()
 	query := parsed.Query()
-	if query.Get("sslmode") == "" && value == "cockroachdb" {
+	if query.Get("sslmode") == "" && databaseType == databaseTypeCockroach {
 		query.Set("sslmode", "require")
 	}
-	if query.Get("sslmode") == "" && value != "cockroachdb" {
+	if query.Get("sslmode") == "" && databaseType != databaseTypeCockroach {
 		query.Set("sslmode", "disable")
 	}
 	parsed.RawQuery = query.Encode()
@@ -1133,6 +1232,43 @@ func findCockroachPod() (string, error) {
 	return "", fmt.Errorf("未找到 cockroachdb pod，且本地缺少 psql/cockroach 客户端")
 }
 
+func findPostgreSQLPod(dbURI string) (string, string, error) {
+	serviceName, namespace, err := parseKubernetesServiceRef(dbURI)
+	if err != nil {
+		return "", "", err
+	}
+	podNames, err := runCommand(
+		"kubectl",
+		"get",
+		"endpoints",
+		serviceName,
+		"-n",
+		namespace,
+		"-o",
+		"jsonpath={.subsets[*].addresses[*].targetRef.name}",
+	)
+	if err != nil {
+		return "", "", fmt.Errorf("PostgreSQL Service Endpoint 查询失败: %v", err)
+	}
+	names := strings.Fields(podNames)
+	if len(names) == 0 {
+		return "", "", fmt.Errorf("PostgreSQL Service %s/%s 未关联可用 Pod", namespace, serviceName)
+	}
+	return names[0], namespace, nil
+}
+
+func parseKubernetesServiceRef(dbURI string) (string, string, error) {
+	parsed, err := url.Parse(dbURI)
+	if err != nil {
+		return "", "", fmt.Errorf("解析数据库地址失败: %v", err)
+	}
+	parts := strings.Split(strings.TrimSuffix(parsed.Hostname(), "."), ".")
+	if len(parts) < 3 || parts[0] == "" || parts[1] == "" || parts[2] != "svc" {
+		return "", "", fmt.Errorf("数据库地址不是有效的 Kubernetes Service 地址")
+	}
+	return parts[0], parts[1], nil
+}
+
 func escapeSQLLiteral(value string) string {
 	return strings.ReplaceAll(value, "'", "''")
 }
@@ -1150,6 +1286,25 @@ func rewriteCockroachURLForLocalhost(dbURI string) (string, error) {
 	if query.Get("sslmode") == "" {
 		query.Set("sslmode", "verify-full")
 	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
+}
+
+func rewritePostgreSQLURLForLocalhost(dbURI string) (string, error) {
+	parsed, err := url.Parse(dbURI)
+	if err != nil {
+		return "", fmt.Errorf("解析数据库地址失败: %v", err)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("数据库地址格式不正确")
+	}
+	port := parsed.Port()
+	if port == "" {
+		port = "5432"
+	}
+	parsed.Host = "localhost:" + port
+	query := parsed.Query()
+	query.Set("sslmode", "disable")
 	parsed.RawQuery = query.Encode()
 	return parsed.String(), nil
 }
